@@ -1,0 +1,183 @@
+services:
+  # PostgreSQL with pgvector
+  db:
+    image: ankane/pgvector:latest
+    container_name: legal_postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-legal_chatbot}
+      POSTGRES_USER: ${POSTGRES_USER:-legal_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme123}
+      POSTGRES_INITDB_ARGS: "-E UTF8 --locale=en_US.UTF-8"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-legal_admin} -d ${POSTGRES_DB:-legal_chatbot} && psql -U ${POSTGRES_USER:-legal_admin} -d ${POSTGRES_DB:-legal_chatbot} -tAc \"SELECT NOT pg_is_in_recovery();\" | grep -q t"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 120s
+    networks:
+      - legal_network
+    restart: unless-stopped
+
+  # Redis for Celery
+  redis:
+    image: redis:7-alpine
+    container_name: legal_redis
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-redis123}
+    volumes:
+      - ./data/redis:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - legal_network
+    restart: unless-stopped
+
+  # Qdrant vector database
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    container_name: legal_qdrant
+    volumes:
+      - ./data/qdrant:/qdrant/storage
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    environment:
+      QDRANT__SERVICE__GRPC_PORT: "6334"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333'"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks:
+      - legal_network
+    restart: unless-stopped
+
+  # Legal Chatbot FastAPI service
+  fastapi:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: legal_fastapi
+    cpus: 1.0
+    mem_limit: 2g
+    mem_reservation: 512m
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-legal_admin}:${POSTGRES_PASSWORD:-changeme123}@db:5432/${POSTGRES_DB:-legal_chatbot}
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
+      GROQ_INTERNAL_API_KEY: ${GROQ_INTERNAL_API_KEY:-}
+      GROQ_INTERNAL_MODEL: ${GROQ_INTERNAL_MODEL:-llama-3.1-8b-instant}
+      GENAI_API_KEY: ${GENAI_API_KEY:-}
+      GENAI_MODEL: ${GENAI_MODEL:-gemini-2.0-flash}
+      GENAI_INTERNAL_API_KEY: ${GENAI_INTERNAL_API_KEY:-}
+      GENAI_INTERNAL_MODEL: ${GENAI_INTERNAL_MODEL:-gemini-2.0-flash}
+      LLM_PROVIDER_CHAT: ${LLM_PROVIDER_CHAT:-gemini}
+      LLM_PROVIDER_INTERNAL: ${LLM_PROVIDER_INTERNAL:-gemini}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-m3}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis123}@redis:6379/0
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:-redis123}@redis:6379/1
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:-redis123}@redis:6379/2
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: "6333"
+      QDRANT_GRPC_PORT: "6334"
+      SIMILARITY_THRESHOLD: ${SIMILARITY_THRESHOLD:-0.35}
+      GROQ_MAX_TOKENS: ${GROQ_MAX_TOKENS:-2048}
+      EXA_API_KEY: ${EXA_API_KEY:-}
+      EXA_ENABLED: ${EXA_ENABLED:-false}
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      TAVILY_ENABLED: ${TAVILY_ENABLED:-false}
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      TOKENIZERS_PARALLELISM: "false"
+      TORCH_NUM_THREADS: "1"
+      NUMEXPR_MAX_THREADS: "1"
+    volumes:
+      - .:/app
+      - fastapi_cache:/app/.cache
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
+    networks:
+      - legal_network
+    restart: unless-stopped
+
+  # Celery worker for document processing
+  celery_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: legal_celery_worker
+    cpus: 1.0
+    mem_limit: 1.5g
+    mem_reservation: 512m
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-legal_admin}:${POSTGRES_PASSWORD:-changeme123}@db:5432/${POSTGRES_DB:-legal_chatbot}
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
+      GROQ_INTERNAL_API_KEY: ${GROQ_INTERNAL_API_KEY:-}
+      GROQ_INTERNAL_MODEL: ${GROQ_INTERNAL_MODEL:-llama-3.1-8b-instant}
+      GENAI_API_KEY: ${GENAI_API_KEY:-}
+      GENAI_MODEL: ${GENAI_MODEL:-gemini-2.0-flash}
+      GENAI_INTERNAL_API_KEY: ${GENAI_INTERNAL_API_KEY:-}
+      GENAI_INTERNAL_MODEL: ${GENAI_INTERNAL_MODEL:-gemini-2.0-flash}
+      LLM_PROVIDER_CHAT: ${LLM_PROVIDER_CHAT:-gemini}
+      LLM_PROVIDER_INTERNAL: ${LLM_PROVIDER_INTERNAL:-gemini}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-m3}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis123}@redis:6379/0
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:-redis123}@redis:6379/1
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:-redis123}@redis:6379/2
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: "6333"
+      QDRANT_GRPC_PORT: "6334"
+      SIMILARITY_THRESHOLD: ${SIMILARITY_THRESHOLD:-0.35}
+      GROQ_MAX_TOKENS: ${GROQ_MAX_TOKENS:-2048}
+      EXA_API_KEY: ${EXA_API_KEY:-}
+      EXA_ENABLED: ${EXA_ENABLED:-false}
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      TAVILY_ENABLED: ${TAVILY_ENABLED:-false}
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      TOKENIZERS_PARALLELISM: "false"
+      TORCH_NUM_THREADS: "1"
+      NUMEXPR_MAX_THREADS: "1"
+    volumes:
+      - .:/app
+      - fastapi_cache:/app/.cache
+    command: celery -A app.celery_app:celery worker -Q chatbot,documents,ingestion -l info --concurrency=1
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    networks:
+      - legal_network
+    restart: unless-stopped
+
+networks:
+  legal_network:
+    driver: bridge
+
+volumes:
+  fastapi_cache:
+    driver: local
